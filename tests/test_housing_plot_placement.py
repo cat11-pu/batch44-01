@@ -1,3 +1,5 @@
+import threading
+
 import pytest
 
 import housing_plot_placement as hpp
@@ -175,3 +177,66 @@ def test_blueprint_copy_preserves_position_and_rotation():
     copied = h.plot("p2")["items"][0]
     assert (copied["x"], copied["y"]) == (5, 5)
     assert copied["rotation"] == 90
+
+
+def test_diagonally_rotated_furniture_cannot_cross_the_plot_wall():
+    h = make()
+    item(h, "cabinet", (4, 1))
+    before = h.plot("p1")
+    with pytest.raises(hpp.HousingError) as exc:
+        h.place("p1", "cabinet", 9, 5, rotation=45)
+    assert exc.value.code == "HOME_PLACE_PARTIAL"
+    assert h.plot("p1") == before
+    assert "cabinet" in h.inventory("player")
+
+
+def test_concurrent_placement_of_the_same_instance_has_one_owner():
+    h = make()
+    item(h, "chair", (1, 1))
+    outcomes = []
+
+    def place():
+        try:
+            h.place("p1", "chair", 5, 5)
+            outcomes.append("placed")
+        except hpp.HousingError as exc:
+            outcomes.append(exc.code)
+
+    threads = [threading.Thread(target=place) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert sorted(outcomes) == ["HOME_ITEM_DUP", "placed"]
+    assert "chair" not in h.inventory("player")
+    assert len(h.plot("p1")["items"]) == 1
+
+
+def test_undoing_removal_moves_the_same_instance_back_without_duplication():
+    h = make()
+    item(h, "desk", (2, 1), enhance=2, bound=True)
+    h.place("p1", "desk", 3, 3)
+    h.remove("p1", "desk")
+    h.undo("p1")
+
+    assert "desk" not in h.inventory("player")
+    placements = h.plot("p1")["items"]
+    assert len(placements) == 1
+    assert placements[0]["enhance"] == 2
+    assert placements[0]["bound"] is True
+
+
+def test_failed_blueprint_copy_does_not_add_any_furniture():
+    h = make()
+    item(h, "bench-a", (2, 2), template="wood-bench")
+    item(h, "bench-b", (2, 2), template="wood-bench")
+    h.place("src", "bench-a", 3, 3)
+    h.place("src", "bench-b", 7, 7)
+    h.copy_layout("src", "dst", allowed_templates={"wood-bench"})
+    before = h.plot("dst")
+
+    with pytest.raises(hpp.HousingError) as exc:
+        h.copy_layout("src", "dst", allowed_templates={"wood-bench"})
+    assert exc.value.code == "HOME_PLACE_PARTIAL"
+    assert h.plot("dst") == before
